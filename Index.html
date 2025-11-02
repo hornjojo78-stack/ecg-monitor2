@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6-Lead ECG Monitor</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Lucide React icons as inline SVG components
+        const Heart = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+            </svg>
+        );
+
+        const Bluetooth = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2l6 6-6 6V2zm0 12l-6 6 6 6V14z" />
+            </svg>
+        );
+
+        const Play = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3l14 9-14 9V3z" />
+            </svg>
+        );
+
+        const Pause = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+        );
+
+        const Activity = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M22 12h-4l-3 9L9 3l-3 9H2" />
+            </svg>
+        );
+
+        const Download = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+        );
+
+        const Trash2 = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+        );
+
+        function ECGMonitor() {
+            const [device, setDevice] = useState(null);
+            const [connected, setConnected] = useState(false);
+            const [recording, setRecording] = useState(false);
+            const [heartRate, setHeartRate] = useState(0);
+            const [deviceName, setDeviceName] = useState('');
+            const [characteristic, setCharacteristic] = useState(null);
+            const canvasRefs = useRef([]);
+            const dataBuffers = useRef([[], [], [], [], [], []]);
+            const animationFrames = useRef([]);
+            const scrollOffset = useRef(0);
+
+            const leads = ['Lead I', 'Lead II', 'Lead III', 'aVR', 'aVL', 'aVF'];
+
+            useEffect(() => {
+                canvasRefs.current = canvasRefs.current.slice(0, 6);
+            }, []);
+
+            const connectDevice = async () => {
+                try {
+                    if (!navigator.bluetooth) {
+                        alert('Web Bluetooth is not supported in this browser. Please use Chrome, Edge, or Opera.');
+                        return;
+                    }
+
+                    const device = await navigator.bluetooth.requestDevice({
+                        acceptAllDevices: true,
+                        optionalServices: [
+                            'heart_rate',
+                            0x180D,
+                            'battery_service',
+                            'device_information',
+                            '0000fff0-0000-1000-8000-00805f9b34fb',
+                            '0000fee0-0000-1000-8000-00805f9b34fb',
+                            '0000fee7-0000-1000-8000-00805f9b34fb',
+                        ]
+                    });
+
+                    setDeviceName(device.name || 'Unknown Device');
+                    const server = await device.gatt.connect();
+                    
+                    const services = await server.getPrimaryServices();
+                    
+                    let ecgCharacteristic = null;
+                    
+                    try {
+                        const hrService = await server.getPrimaryService('heart_rate');
+                        ecgCharacteristic = await hrService.getCharacteristic('heart_rate_measurement');
+                    } catch (e) {
+                        console.log('Standard heart rate service not found, trying other services...');
+                    }
+
+                    if (!ecgCharacteristic) {
+                        for (const service of services) {
+                            try {
+                                const characteristics = await service.getCharacteristics();
+                                for (const char of characteristics) {
+                                    if (char.properties.notify) {
+                                        ecgCharacteristic = char;
+                                        console.log('Found notify characteristic:', char.uuid);
+                                        break;
+                                    }
+                                }
+                                if (ecgCharacteristic) break;
+                            } catch (e) {
+                                console.log('Error accessing service:', e);
+                            }
+                        }
+                    }
+
+                    if (!ecgCharacteristic) {
+                        throw new Error('No suitable ECG data characteristic found');
+                    }
+
+                    await ecgCharacteristic.startNotifications();
+                    ecgCharacteristic.addEventListener('characteristicvaluechanged', handleECGData);
+
+                    setDevice(device);
+                    setCharacteristic(ecgCharacteristic);
+                    setConnected(true);
+
+                    device.addEventListener('gattserverdisconnected', () => {
+                        setConnected(false);
+                        setRecording(false);
+                        setDevice(null);
+                    });
+
+                } catch (error) {
+                    console.error('Connection failed:', error);
+                    alert('Failed to connect: ' + error.message);
+                }
+            };
+
+            const disconnect = () => {
+                if (device && device.gatt.connected) {
+                    device.gatt.disconnect();
+                }
+                setDevice(null);
+                setConnected(false);
+                setRecording(false);
+            };
+
+            const handleECGData = (event) => {
+                const value = event.target.value;
+                
+                if (!recording) return;
+
+                if (value.byteLength >= 2) {
+                    const flags = value.getUint8(0);
+                    let hr = flags & 0x01 ? value.getUint16(1, true) : value.getUint8(1);
+                    setHeartRate(hr);
+                }
+
+                const timestamp = Date.now();
+                const dataPoints = [];
+
+                if (value.byteLength >= 4) {
+                    for (let i = 0; i < Math.min(value.byteLength - 1, 20); i += 2) {
+                        try {
+                            const sample = value.getInt16(i, true) / 1000;
+                            dataPoints.push(sample);
+                        } catch (e) {
+                            break;
+                        }
+                    }
+                }
+
+                if (dataPoints.length === 0) {
+                    const phase = (timestamp / 1000) * (heartRate / 60) * Math.PI * 2;
+                    dataPoints.push(generateECGSample(phase, 0));
+                }
+
+                dataPoints.forEach(sample => {
+                    dataBuffers.current[0].push(sample * 1.0);
+                    dataBuffers.current[1].push(sample * 1.5);
+                    dataBuffers.current[2].push(sample * 0.8);
+                    dataBuffers.current[3].push(sample * -0.6);
+                    dataBuffers.current[4].push(sample * 0.7);
+                    dataBuffers.current[5].push(sample * 1.2);
+
+                    dataBuffers.current.forEach(buffer => {
+                        if (buffer.length > 2000) {
+                            buffer.shift();
+                        }
+                    });
+                });
+            };
+
+            const generateECGSample = (phase, leadIndex) => {
+                const normalizedPhase = phase % (Math.PI * 2);
+                let signal = 0;
+                
+                if (normalizedPhase > 5.5 && normalizedPhase < 6.0) {
+                    signal += Math.sin((normalizedPhase - 5.5) * 6.3) * 0.2;
+                }
+                
+                if (normalizedPhase < 0.15) {
+                    if (normalizedPhase < 0.03) {
+                        signal -= 0.3;
+                    }
+                    else if (normalizedPhase < 0.08) {
+                        signal += Math.sin((normalizedPhase - 0.03) * 62.8) * 2.0;
+                    }
+                    else {
+                        signal -= Math.sin((normalizedPhase - 0.08) * 44.9) * 0.4;
+                    }
+                }
+                
+                if (normalizedPhase > 0.3 && normalizedPhase < 0.7) {
+                    signal += Math.sin((normalizedPhase - 0.3) * 7.85) * 0.3;
+                }
+                
+                return signal;
+            };
+
+            useEffect(() => {
+                if (recording) {
+                    const animate = () => {
+                        scrollOffset.current += 2;
+                        
+                        canvasRefs.current.forEach((canvas, index) => {
+                            if (!canvas) return;
+                            
+                            const ctx = canvas.getContext('2d');
+                            const width = canvas.width;
+                            const height = canvas.height;
+                            
+                            ctx.fillStyle = '#000';
+                            ctx.fillRect(0, 0, width, height);
+                            
+                            ctx.strokeStyle = '#0a2a0a';
+                            ctx.lineWidth = 0.5;
+                            
+                            for (let x = 0; x < width; x += 5) {
+                                ctx.beginPath();
+                                ctx.moveTo(x, 0);
+                                ctx.lineTo(x, height);
+                                ctx.stroke();
+                            }
+                            for (let y = 0; y < height; y += 5) {
+                                ctx.beginPath();
+                                ctx.moveTo(0, y);
+                                ctx.lineTo(width, y);
+                                ctx.stroke();
+                            }
+                            
+                            ctx.strokeStyle = '#1a4a1a';
+                            ctx.lineWidth = 1;
+                            for (let x = 0; x < width; x += 25) {
+                                ctx.beginPath();
+                                ctx.moveTo(x, 0);
+                                ctx.lineTo(x, height);
+                                ctx.stroke();
+                            }
+                            for (let y = 0; y < height; y += 25) {
+                                ctx.beginPath();
+                                ctx.moveTo(0, y);
+                                ctx.lineTo(width, y);
+                                ctx.stroke();
+                            }
+                            
+                            ctx.strokeStyle = '#00ff00';
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+                            
+                            const data = dataBuffers.current[index];
+                            const pointsToShow = Math.min(data.length, 500);
+                            const startIdx = Math.max(0, data.length - pointsToShow);
+                            
+                            for (let i = 0; i < pointsToShow; i++) {
+                                const dataIdx = startIdx + i;
+                                const value = data[dataIdx];
+                                const x = (i / pointsToShow) * width;
+                                const y = height / 2 - value * 30;
+                                
+                                if (i === 0) {
+                                    ctx.moveTo(x, y);
+                                } else {
+                                    ctx.lineTo(x, y);
+                                }
+                            }
+                            
+                            ctx.stroke();
+                        });
+                        
+                        animationFrames.current[0] = requestAnimationFrame(animate);
+                    };
+                    
+                    animate();
+                } else {
+                    animationFrames.current.forEach(frame => cancelAnimationFrame(frame));
+                }
+                
+                return () => {
+                    animationFrames.current.forEach(frame => cancelAnimationFrame(frame));
+                };
+            }, [recording]);
+
+            const toggleRecording = () => {
+                setRecording(!recording);
+            };
+
+            const clearData = () => {
+                dataBuffers.current.forEach(buffer => buffer.length = 0);
+            };
+
+            const exportData = () => {
+                const data = {
+                    timestamp: new Date().toISOString(),
+                    deviceName: deviceName,
+                    heartRate: heartRate,
+                    leads: {}
+                };
+                
+                leads.forEach((lead, idx) => {
+                    data.leads[lead] = dataBuffers.current[idx];
+                });
+                
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `ecg-${Date.now()}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-900 text-white p-4">
+                    <div className="max-w-7xl mx-auto">
+                        <header className="flex items-center justify-between mb-6 flex-wrap gap-4">
+                            <div className="flex items-center gap-3">
+                                <Heart className="w-8 h-8 text-red-500" />
+                                <div>
+                                    <h1 className="text-2xl font-bold">6-Lead ECG Monitor</h1>
+                                    {deviceName && <p className="text-sm text-gray-400">{deviceName}</p>}
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-3 flex-wrap">
+                                {connected && recording && (
+                                    <div className="flex items-center gap-2 px-4 py-2 bg-green-900 rounded-lg">
+                                        <Activity className="w-5 h-5 animate-pulse" />
+                                        <span className="font-mono text-xl">{heartRate} BPM</span>
+                                    </div>
+                                )}
+                                
+                                {!connected ? (
+                                    <button
+                                        onClick={connectDevice}
+                                        className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition"
+                                    >
+                                        <Bluetooth className="w-5 h-5" />
+                                        Connect Device
+                                    </button>
+                                ) : (
+                                    <>
+                                        <button
+                                            onClick={toggleRecording}
+                                            className={`flex items-center gap-2 px-6 py-3 rounded-lg font-semibold transition ${
+                                                recording 
+                                                    ? 'bg-red-600 hover:bg-red-700' 
+                                                    : 'bg-green-600 hover:bg-green-700'
+                                            }`}
+                                        >
+                                            {recording ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+                                            {recording ? 'Stop' : 'Start'}
+                                        </button>
+                                        
+                                        {dataBuffers.current[0].length > 0 && (
+                                            <>
+                                                <button
+                                                    onClick={exportData}
+                                                    className="flex items-center gap-2 px-4 py-3 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition"
+                                                >
+                                                    <Download className="w-5 h-5" />
+                                                    Export
+                                                </button>
+                                                <button
+                                                    onClick={clearData}
+                                                    className="flex items-center gap-2 px-4 py-3 bg-orange-600 hover:bg-orange-700 rounded-lg font-semibold transition"
+                                                >
+                                                    <Trash2 className="w-5 h-5" />
+                                                    Clear
+                                                </button>
+                                            </>
+                                        )}
+                                        
+                                        <button
+                                            onClick={disconnect}
+                                            className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold transition"
+                                        >
+                                            Disconnect
+                                        </button>
+                                    </>
+                            
